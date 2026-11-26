@@ -43,6 +43,34 @@ def get_relay(sn):
     return http_json(f"https://buckler.pw/api/relay/{sn}")["relay"]
 
 
+def voltage_line(sn, relay, now, after=None):
+    """Строка с последним напряжением по фазам (минутные данные Buckler).
+
+    after — не брать показания старше этого момента (ISO), чтобы после включения
+    света не показать значения, снятые ещё до отключения. Возвращает None, если
+    свежих данных пока нет (они появляются с задержкой 1–2 минуты).
+    """
+    to_ms = int(now.timestamp() * 1000)
+    from_ms = to_ms - 300_000
+    if after:
+        from_ms = max(from_ms, int(datetime.fromisoformat(after).timestamp() * 1000) + 1)
+    try:
+        data = http_json(f"https://buckler.pw/api/relay/{sn}/readings"
+                         f"?from={from_ms}&to={to_ms}&type=voltage").get("data") or []
+        data = [d for d in data if d.get("timestamp", 0) >= from_ms]
+        actual = data[-1]["voltage"]["actual"]
+    except Exception as e:
+        print(f"Нет данных о напряжении: {e}")
+        return None
+    vs = (relay.get("settings") or {}).get("voltage") or {}
+    vmin, vmax = vs.get("min", 198), vs.get("max", 242)
+    parts = []
+    for i, v in enumerate(actual, 1):
+        mark = " ⚠️" if v < vmin or v > vmax else ""
+        parts.append(f"L{i}: {round(v)} В{mark}")
+    return "Напряжение: " + " · ".join(parts)
+
+
 def fmt_time(iso):
     if not iso:
         return "?"
@@ -59,9 +87,11 @@ def fmt_duration(seconds):
     return f"{h} ч {m} мин" if h else f"{m} мин"
 
 
-def status_text(name, online, since, last_conn, now):
+def status_text(name, online, since, last_conn, now, volts=None):
     head = f"💡 {name}: свет есть" if online else f"🔌 {name}: света нет (реле офлайн)"
     lines = [head]
+    if volts:
+        lines.append(volts)
     if since:
         lines.append("В этом состоянии: " + fmt_duration((now - datetime.fromisoformat(since)).total_seconds()))
     lines.append(f"Последняя связь реле: {fmt_time(last_conn)}")
@@ -118,8 +148,11 @@ def main():
         print(f"online={online} lastConnection={last_conn} age={age} prev={state.get('online')} asked={asked}")
 
         if state.get("online") != online:
+            state.pop("volts_after", None)
             if "online" not in state:
                 text = f"🔎 Трекер запущен. {name}: " + ("свет есть ✅" if online else "реле офлайн ❌")
+                if online:
+                    text += "\n" + (voltage_line(sn, relay, now) or "Напряжение: данных пока нет")
             else:
                 since = state.get("since")
                 dur = ""
@@ -128,6 +161,13 @@ def main():
                     dur = (" (света не было " if online else " (свет был ") + fmt_duration(secs) + ")"
                 if online:
                     text = f"💡 Свет появился — {name}{dur}"
+                    # since здесь — момент последней связи перед отключением
+                    volts = voltage_line(sn, relay, now, after=since)
+                    if volts:
+                        text += "\n" + volts
+                    else:
+                        text += "\nНапряжение по фазам пришлю следующим сообщением"
+                        state["volts_after"] = since or now.isoformat()
                 else:
                     text = (f"🔌 Света нет — {name}: реле офлайн{dur}\n"
                             f"Последняя связь: {fmt_time(last_conn)}")
@@ -136,8 +176,15 @@ def main():
             # для отключения точнее брать момент последней связи реле
             state["since"] = (last_conn.replace("Z", "+00:00") if (not online and last_conn)
                               else now.isoformat())
-        elif asked:
-            send_telegram(status_text(name, online, state.get("since"), last_conn, now))
+        else:
+            if online and state.get("volts_after"):
+                volts = voltage_line(sn, relay, now, after=state["volts_after"])
+                if volts:
+                    send_telegram(f"⚡ {name}, после включения света:\n{volts}")
+                    state.pop("volts_after")
+            if asked:
+                volts = (voltage_line(sn, relay, now) or "Напряжение: данных пока нет") if online else None
+                send_telegram(status_text(name, online, state.get("since"), last_conn, now, volts))
 
     if json.dumps(state, sort_keys=True) != before:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
