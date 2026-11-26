@@ -15,6 +15,7 @@ import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+STALE_SECONDS = 180  # нет связи дольше 3 минут -> считаем, что света нет
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 try:
     TZ = ZoneInfo("Europe/Kyiv")
@@ -106,10 +107,15 @@ def main():
         relay = None
 
     if relay is not None:
-        online = bool(relay.get("lastOnlineStatus"))
         last_conn = relay.get("lastConnection")
+        # Флаг lastOnlineStatus сервер сбрасывает с большой задержкой, поэтому,
+        # как и сам сайт Buckler, смотрим на давность последней связи реле.
+        age = None
+        if last_conn:
+            age = (now - datetime.fromisoformat(last_conn.replace("Z", "+00:00"))).total_seconds()
+        online = bool(relay.get("lastOnlineStatus")) and age is not None and age < STALE_SECONDS
         name = os.environ.get("RELAY_NAME") or "Дом"
-        print(f"online={online} lastConnection={last_conn} prev={state.get('online')} asked={asked}")
+        print(f"online={online} lastConnection={last_conn} age={age} prev={state.get('online')} asked={asked}")
 
         if state.get("online") != online:
             if "online" not in state:
