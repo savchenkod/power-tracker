@@ -15,7 +15,7 @@ import urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-STALE_SECONDS = 180  # нет связи дольше 3 минут -> считаем, что света нет
+STALE_SECONDS = 120  # нет связи дольше 2 минут -> считаем, что света нет
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 try:
     TZ = ZoneInfo("Europe/Kyiv")
